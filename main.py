@@ -41,9 +41,9 @@ anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # Common household item categories for labels
 COMMON_CATEGORIES = [
-    "Clothing", "Electronics", "Books", "Kitchen", "Furniture",
-    "Decor", "Tools", "Documents", "Toys", "Sports", "Garden",
-    "Bathroom", "Office", "Cleaning", "Misc"
+    "accessories", "bedding", "clothing", "clothing-winter", "decor",
+    "documents", "electronics", "furniture", "kitchen-items", "personal-care", "shoes",
+    "shoes", "supplies-cleaning", "supplies-office", "tools"
 ]
 
 
@@ -318,7 +318,8 @@ async def classify_image_with_claude(image_data: bytes, filename: str = "image.j
     # Convert compressed image to base64
     image_b64 = base64.b64encode(compressed_image).decode()
     base64_size = len(image_b64)
-    logger.info(f"Base64 encoded size: {base64_size/1024/1024:.1f}MB (limit: 5MB)")
+    logger.info(
+        f"Base64 encoded size: {base64_size/1024/1024:.1f}MB (limit: 5MB)")
 
     # Specialized prompt for household item classification
     prompt = f"""Analyze this image of a household item. You are helping someone organize their home inventory during packing/moving.
