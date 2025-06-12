@@ -4,11 +4,12 @@ import os
 from typing import Optional, Dict
 import logging
 from datetime import datetime
-import uvicorn
-from anthropic import Anthropic
+import io
+from PIL import Image
 from fastapi import FastAPI, UploadFile, Form, HTTPException
+from anthropic import Anthropic
 import httpx
-
+import uvicorn
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,14 @@ HOMEBOX_URL = os.getenv("HOMEBOX_URL", "http://localhost:7745")
 HOMEBOX_USERNAME = os.getenv("HOMEBOX_USERNAME")
 HOMEBOX_PASSWORD = os.getenv("HOMEBOX_PASSWORD")
 
+# Image compression settings
+MAX_IMAGE_SIZE = float(os.getenv("MAX_IMAGE_SIZE_MB", "4.5")
+                       ) * 1024 * 1024  # Default 4.5MB
+# Claude's max, but we can go smaller
+MAX_DIMENSION = int(os.getenv("MAX_DIMENSION", "1568"))
+# Good balance of quality vs size
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "85"))
+
 # Initialize Anthropic client
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -35,6 +44,83 @@ COMMON_CATEGORIES = [
     "Decor", "Tools", "Documents", "Toys", "Sports", "Garden",
     "Bathroom", "Office", "Cleaning", "Misc"
 ]
+
+
+def compress_image_for_claude(image_data: bytes, filename: str = "image.jpg") -> bytes:
+    """
+    Compress image to meet Claude's requirements while maintaining quality for classification.
+
+    - Resizes if larger than MAX_DIMENSION pixels
+    - Compresses to JPEG if size > MAX_IMAGE_SIZE
+    - Maintains aspect ratio
+    - Optimizes for household item classification
+    """
+    try:
+        # Open image with PIL
+        with Image.open(io.BytesIO(image_data)) as img:
+            # Convert to RGB if necessary (handles HEIC, PNG with transparency, etc.)
+            if img.mode in ("RGBA", "LA", "P"):
+                # Create white background for transparent images
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode == "P":
+                    img = img.convert("RGBA")
+                background.paste(img, mask=img.split()
+                                 [-1] if img.mode in ("RGBA", "LA") else None)
+                img = background
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            original_size = len(image_data)
+            logger.info(
+                f"Original image: {img.size[0]}x{img.size[1]}, {original_size/1024/1024:.1f}MB")
+
+            # Check if we need to resize (if either dimension is too large)
+            if max(img.size) > MAX_DIMENSION:
+                # Calculate new size maintaining aspect ratio
+                ratio = MAX_DIMENSION / max(img.size)
+                new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                logger.info(f"Resized to: {img.size[0]}x{img.size[1]}")
+
+            # Compress to JPEG
+            output = io.BytesIO()
+
+            # Start with high quality
+            quality = JPEG_QUALITY
+
+            while quality > 20:  # Don't go below 20% quality
+                output.seek(0)
+                output.truncate(0)
+
+                img.save(output, format="JPEG", quality=quality, optimize=True)
+                compressed_size = output.tell()
+
+                if compressed_size <= MAX_IMAGE_SIZE or quality <= 20:
+                    break
+
+                # Reduce quality for next iteration
+                quality -= 10
+                logger.info(
+                    f"Trying quality {quality}%, size: {compressed_size/1024/1024:.1f}MB")
+
+            compressed_data = output.getvalue()
+            final_size = len(compressed_data)
+
+            compression_ratio = (
+                original_size - final_size) / original_size * 100
+            logger.info(
+                f"Compressed: {final_size/1024/1024:.1f}MB (saved {compression_ratio:.1f}%)")
+
+            if final_size > MAX_IMAGE_SIZE:
+                logger.warning(
+                    f"Image still large after compression: {final_size/1024/1024:.1f}MB")
+
+            return compressed_data
+
+    except Exception as e:
+        logger.error(f"Failed to compress image: {e}")
+        # Return original if compression fails
+        return image_data
 
 
 class HomeBoxAPI:
@@ -222,11 +308,14 @@ class HomeBoxAPI:
 homebox = HomeBoxAPI(HOMEBOX_URL, HOMEBOX_USERNAME, HOMEBOX_PASSWORD)
 
 
-async def classify_image_with_claude(image_data: bytes) -> Dict[str, str]:
+async def classify_image_with_claude(image_data: bytes, filename: str = "image.jpg") -> Dict[str, str]:
     """Use Claude 4 Sonnet to classify the household item in the image"""
 
-    # Convert image to base64
-    image_b64 = base64.b64encode(image_data).decode()
+    # Compress image to meet Claude's requirements
+    compressed_image = compress_image_for_claude(image_data, filename)
+
+    # Convert compressed image to base64
+    image_b64 = base64.b64encode(compressed_image).decode()
 
     # Specialized prompt for household item classification
     prompt = f"""Analyze this image of a household item. You are helping someone organize their home inventory during packing/moving.
@@ -246,7 +335,8 @@ Return only valid JSON, no other text."""
 
     try:
         message = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514	",
+            # Using Claude 3.5 Sonnet (current best vision model)
+            model="claude-3-5-sonnet-20241022",
             max_tokens=300,
             messages=[
                 {
@@ -336,8 +426,8 @@ async def classify_item(
         logger.info(
             f"Processing image: {image.filename}, size: {len(image_data)} bytes, location: {location}")
 
-        # Step 1: Classify image with Claude
-        classification = await classify_image_with_claude(image_data)
+        # Step 1: Classify image with Claude (uses compressed version)
+        classification = await classify_image_with_claude(image_data, image.filename or "item_photo.jpg")
         logger.info(f"Classification result: {classification}")
 
         # Step 2: Find or create location
