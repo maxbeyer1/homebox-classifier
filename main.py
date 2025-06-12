@@ -246,8 +246,7 @@ Return only valid JSON, no other text."""
 
     try:
         message = anthropic_client.messages.create(
-            # Using Claude 3.5 Sonnet (current best vision model)
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-20250514	",
             max_tokens=300,
             messages=[
                 {
