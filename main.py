@@ -28,12 +28,13 @@ HOMEBOX_USERNAME = os.getenv("HOMEBOX_USERNAME")
 HOMEBOX_PASSWORD = os.getenv("HOMEBOX_PASSWORD")
 
 # Image compression settings
-MAX_IMAGE_SIZE = float(os.getenv("MAX_IMAGE_SIZE_MB", "4.5")
-                       ) * 1024 * 1024  # Default 4.5MB
-# Claude's max, but we can go smaller
-MAX_DIMENSION = int(os.getenv("MAX_DIMENSION", "1568"))
-# Good balance of quality vs size
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "85"))
+# Target 3.75MB raw to account for ~33% base64 encoding overhead (3.75MB * 1.33 ≈ 5MB)
+MAX_IMAGE_SIZE = float(os.getenv("MAX_IMAGE_SIZE_MB", "3.75")
+                       ) * 1024 * 1024  # Default 3.75MB
+# More conservative dimension limit for better compression
+MAX_DIMENSION = int(os.getenv("MAX_DIMENSION", "1280"))
+# Start with lower quality for more aggressive compression
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "75"))
 
 # Initialize Anthropic client
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -88,18 +89,18 @@ def compress_image_for_claude(image_data: bytes, filename: str = "image.jpg") ->
             # Start with high quality
             quality = JPEG_QUALITY
 
-            while quality > 20:  # Don't go below 20% quality
+            while quality > 15:  # Don't go below 15% quality
                 output.seek(0)
                 output.truncate(0)
 
                 img.save(output, format="JPEG", quality=quality, optimize=True)
                 compressed_size = output.tell()
 
-                if compressed_size <= MAX_IMAGE_SIZE or quality <= 20:
+                if compressed_size <= MAX_IMAGE_SIZE or quality <= 15:
                     break
 
-                # Reduce quality for next iteration
-                quality -= 10
+                # Reduce quality more aggressively for next iteration
+                quality -= 15
                 logger.info(
                     f"Trying quality {quality}%, size: {compressed_size/1024/1024:.1f}MB")
 
@@ -316,6 +317,8 @@ async def classify_image_with_claude(image_data: bytes, filename: str = "image.j
 
     # Convert compressed image to base64
     image_b64 = base64.b64encode(compressed_image).decode()
+    base64_size = len(image_b64)
+    logger.info(f"Base64 encoded size: {base64_size/1024/1024:.1f}MB (limit: 5MB)")
 
     # Specialized prompt for household item classification
     prompt = f"""Analyze this image of a household item. You are helping someone organize their home inventory during packing/moving.
